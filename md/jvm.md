@@ -20,14 +20,14 @@ public class Math {
         return c;
     }
 
-
     public static void main(String[] args) {
         Math math = new Math();
         math.compute();
     }
 }
 ```
-反编译:执行命令javap -c Math.class
+反编译:执行命令javap -c Math.class  
+类被加载到方法区中后主要包含 运行时常量池、类型信息、字段信息、方法信息、类加载器的引用、对应class实例的引用等信息。
 ```
 Compiled from "Math.java"
 public class java8.jvm.Math {
@@ -76,7 +76,122 @@ public class java8.jvm.Math {
 
 ```
 ## 类加载器
->1.引导类加载器：负责加载支撑JVM运行的位于JRE的lib目录下的核心类库，比如rt.jar、charsets.jar等  
->2.扩展类加载器：负责加载支撑JVM运行的位于JRE的lib目录下的ext扩展目录中的JAR类包  
->3.应用程序类加载器：负责加载ClassPath路径下的类包，主要就是加载你自己写的那些类  
->4.自定义加载器：负责加载用户自定义路径下的类包
+>1-引导类加载器：负责加载支撑JVM运行的位于JRE的lib目录下的核心类库，比如rt.jar、charsets.jar等  
+>2-扩展类加载器：负责加载支撑JVM运行的位于JRE的lib目录下的ext扩展目录中的JAR类包  
+>3-应用程序类加载器：负责加载ClassPath路径下的类包，主要就是加载你自己写的那些类  
+>4-自定义加载器：负责加载用户自定义路径下的类包
+
+
+## 类加载器初始化过程：
+>1-创建JVM启动器实例sun.misc.Launcher,单例模式(饿汉式),保证一个JVM虚拟机内只有一个sun.misc.Launcher实例  
+>2-在Launcher构造方法内部，其创建了两个类加载器，分别是sun.misc.Launcher.ExtClassLoader(扩展类加载器)和sun.misc.Launcher.AppClassLoader(应用类加载器)。  
+>3-JVM默认使用Launcher的getClassLoader()方法返回的类加载器AppClassLoader的实例加载我们的应用程序。  
+```
+public class Launcher {
+    private static URLStreamHandlerFactory factory = new Launcher.Factory();
+    // 单例饿汉式
+    private static Launcher launcher = new Launcher();
+    private static String bootClassPath = System.getProperty("sun.boot.class.path");
+    private ClassLoader loader;
+    private static URLStreamHandler fileHandler;
+
+    public static Launcher getLauncher() {
+        return launcher;
+    }
+
+    public Launcher() {
+        Launcher.ExtClassLoader var1;
+        try {
+            // ExtClassLoader将父加载器注册为空
+            // 引导类加载器bootstrapLoader不是实际存在的,是通过URLClassPath加载核心类库的抽象概念
+            var1 = Launcher.ExtClassLoader.getExtClassLoader();
+        } catch (IOException var10) {
+            throw new InternalError("Could not create extension class loader", var10);
+        }
+
+        try {
+            // 设置默认加载器为AppClassLoader,并将父加载器注册为ExtClassLoader
+            this.loader = Launcher.AppClassLoader.getAppClassLoader(var1);
+        } catch (IOException var9) {
+            throw new InternalError("Could not create application class loader", var9);
+        }
+```
+
+## 双亲委派机制
+加载某个类时会先委托父加载器寻找目标类，找不到再委托上层父加载器加载，如果所有父加载器在自己的加载类路径下都找不到目标类，则在自己的类加载路径中查找并载入目标类  
+类的继承关系AppClassLoader,ExtClassLoader-->URLClassLoader-->SecureClassLoader-->ClassLoader.loadClass()  
+```
+// lassLoader的loadClass方法，采用递归的思路,实现了双亲委派机制
+protected Class<?> loadClass(String name, boolean resolve)
+        throws ClassNotFoundException
+    {
+        synchronized (getClassLoadingLock(name)) {
+            // First, check if the class has already been loaded
+            Class<?> c = findLoadedClass(name);
+            if (c == null) {
+                long t0 = System.nanoTime();
+                try {
+                    if (parent != null) {
+                        // 如果当前加载器父加载器不为空则委托父加载器加载该类
+                        c = parent.loadClass(name, false);
+                    } else {
+                        // 如果当前加载器父加载器为空则委托引导类加载器加载该类
+                        c = findBootstrapClassOrNull(name);
+                    }
+                } catch (ClassNotFoundException e) {
+                    // ClassNotFoundException thrown if class not found
+                    // from the non-null parent class loader
+                }
+
+                if (c == null) {
+                    // If still not found, then invoke findClass in order
+                    // to find the class.
+                    long t1 = System.nanoTime();
+                    c = findClass(name);
+
+                    // this is the defining class loader; record the stats
+                    sun.misc.PerfCounter.getParentDelegationTime().addTime(t1 - t0);
+                    sun.misc.PerfCounter.getFindClassTime().addElapsedTimeFrom(t1);
+                    sun.misc.PerfCounter.getFindClasses().increment();
+                }
+            }
+            // resolve默认为false,不会执行
+            if (resolve) {
+                resolveClass(c);
+            }
+            return c;
+        }
+    }
+```  
+
+## 设计双亲委派机制的意义
+>1-沙箱安全机制：自己写的java.lang.Integer.class类不会被加载，这样便可以防止核心API库被随意篡改  
+>2-避免类的重复加载：当父加载器已经加载了该类时，就没有必要子ClassLoader再加载一次，保证被加载类的唯一性  
+
+## 全盘负责委托机制
+“全盘负责”是指当一个ClassLoader装载一个类时，除非显示的使用另外一个ClassLoder，该类所依赖及引用的类也由这个ClassLoader载入。  
+
+## 自定义类加载器
+自定义类加载器只需要继承 java.lang.ClassLoader 类，该类有两个核心方法，一个是loadClass(String, boolean)，实现了双亲委派机制，还有一个方法是findClass，默认实现是空方法，所以我们自定义类加载器主要是重写findClass方法。  
+java.lang.ClassLoader类,注释上的demo
+~~~
+ * <blockquote><pre>
+ *     class NetworkClassLoader extends ClassLoader {
+ *         String host;
+ *         int port;
+ *
+ *         public Class findClass(String name) {
+ *             byte[] b = loadClassData(name);
+ *             return defineClass(name, b, 0, b.length);
+ *         }
+ *
+ *         private byte[] loadClassData(String name) {
+ *             // load the class data from the connection
+ *             &nbsp;.&nbsp;.&nbsp;.
+ *         }
+ *     }
+ * </pre></blockquote>
+~~~
+
+
+
